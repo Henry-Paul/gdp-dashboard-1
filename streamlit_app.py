@@ -1,151 +1,99 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
+import io
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+st.set_page_config(page_title="Restaurant Dashboard", layout="wide")
+st.title("🍽️ Restaurant Analytics Dashboard")
+
+# Sidebar - Google Sheets input
+st.sidebar.header("📊 Data Source")
+sheet_url = st.sidebar.text_input(
+    "Paste Google Sheets URL", 
+    "https://docs.google.com/spreadsheets/d/18INCpIytaYX9BSZRB5RisUj5EJb9CXkG/edit?gid=984125391"
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+if st.sidebar.button("🔄 Load Data", type="primary"):
+    with st.spinner("Loading..."):
+        try:
+            # Convert to CSV export
+            csv_url = sheet_url.replace("/edit", "/export?format=csv")
+            df = pd.read_csv(csv_url)
+            st.session_state.df = df
+            st.sidebar.success(f"✅ Loaded {len(df)} rows, {len(df.columns)} columns")
+            st.sidebar.json(df.dtypes.to_dict())
+        except Exception as e:
+            st.sidebar.error(f"❌ Error: {str(e)}")
+            st.sidebar.info("💡 Make sheet 'Anyone with link can VIEW'")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+if 'df' not in st.session_state:
+    st.info("""
+    👆 **Paste your Google Sheets URL in sidebar** and click "Load Data"
+    
+    **Your sheet must be public:** Share → "Anyone with link" → "Viewer"
+    """)
+    st.stop()
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+df = st.session_state.df.copy()
+st.subheader("📋 Data Preview")
+st.dataframe(df.head(10))
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# Auto-detect datetime and numeric columns
+st.subheader("🔍 Auto-Analysis")
+date_cols = df.select_dtypes(include=['object']).columns[df.select_dtypes(include=['object']).apply(
+    lambda x: pd.to_datetime(x, errors='coerce').notna().sum() > len(x)*0.5)]
+num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+if date_cols.empty or not num_cols:
+    st.error("No suitable date/numeric columns found. Please check your data format.")
+    st.stop()
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+# Use first date and numeric columns
+df['date'] = pd.to_datetime(df[date_cols[0]], errors='coerce')
+df['value'] = df[num_cols[0]]
+df['date_only'] = df['date'].dt.date
+df['hour'] = df['date'].dt.hour
+
+filtered_df = df.dropna(subset=['date_only', 'value'])
+
+# HEATMAPS
+st.header("📈 Interactive Heatmaps")
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("Hourly Heatmap")
+    heatmap_data = filtered_df.groupby(['date_only', 'hour'])['value'].sum().reset_index()
+    fig = px.density_heatmap(
+        heatmap_data.head(1000), 
+        x='hour', y='date_only', z='value',
+        color_continuous_scale='Viridis',
+        title="Activity by Hour"
     )
+    st.plotly_chart(fig, use_container_width=True)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+with col2:
+    st.subheader("Daily Heatmap")
+    daily_data = filtered_df.groupby('date_only')['value'].sum().reset_index()
+    fig2 = px.density_heatmap(
+        daily_data.tail(31).set_index('date_only').T,
+        color_continuous_scale='Reds',
+        title="Daily Trends (Last 30 days)"
+    )
+    st.plotly_chart(fig2, use_container_width=True)
 
-    return gdp_df
+# KPIs
+st.header("📊 Key Metrics")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Records", f"{len(filtered_df):,}")
+col2.metric("Total Value", f"₹{filtered_df['value'].sum():,.0f}")
+col3.metric("Peak Hour", filtered_df.groupby('hour')['value'].sum().idxmax())
+col4.metric("Peak Day", filtered_df.groupby('date_only')['value'].sum().idxmax().strftime('%Y-%m-%d'))
 
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+# Growth metrics
+daily_metrics = filtered_df.groupby('date_only')['value'].sum().reset_index()
+daily_metrics['dod'] = daily_metrics['value'].pct_change() * 100
+st.subheader("📈 Day-over-Day Growth")
+st.line_chart(daily_metrics.set_index('date_only')[['value', 'dod']])
